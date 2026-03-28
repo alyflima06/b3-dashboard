@@ -38,3 +38,25 @@ A Streamlit dashboard for analyzing B3 (Brazilian Stock Exchange) stocks, built 
 - The fixed analysis period is 2025 (2025-01-01 to 2025-12-31); date range defaults live in `app.py`.
 - Yahoo Finance ticker format for B3: append `.SA` suffix (e.g., `PETR4.SA`). This mapping is handled in `data/fetcher.py`.
 - All monetary values are in Brazilian Real (R$).
+
+## GitHub Repository
+
+Repository: https://github.com/alyflima06/b3-dashboard
+
+**Auto-sync is active:** every file edited or created by Claude Code is automatically committed and pushed to GitHub via a `PostToolUse` hook configured in `.claude/settings.local.json`.
+
+```bash
+# Manual sync (if needed)
+git add -A
+git commit -m "your message"
+git push
+
+# Check remote status
+git status
+git log --oneline -5
+```
+
+The token is stored in the remote URL. To rotate credentials:
+```bash
+git remote set-url origin https://NEW_TOKEN@github.com/alyflima06/b3-dashboard.git
+```
