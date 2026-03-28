@@ -120,7 +120,37 @@ def init_db() -> None:
                 legenda   TEXT,
                 ordem     INTEGER DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS cronograma (
+                id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+                obra_id              INTEGER NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
+                atividade            TEXT NOT NULL,
+                data_inicio          TEXT NOT NULL,
+                data_fim             TEXT NOT NULL,
+                peso_percentual      REAL DEFAULT 0,
+                percentual_executado REAL DEFAULT 0,
+                ordem                INTEGER DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS orcamento_itens (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                obra_id   INTEGER NOT NULL REFERENCES obras(id) ON DELETE CASCADE,
+                item      TEXT NOT NULL,
+                descricao TEXT,
+                valor     REAL DEFAULT 0
+            );
         """)
+    # Migration: add new columns to obras if they don't exist yet
+    for col, definition in [
+        ("data_inicio", "TEXT"),
+        ("data_prazo",  "TEXT"),
+        ("responsavel", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE obras ADD COLUMN {col} {definition}")
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
     conn.close()
     seed_demo_data()
 
@@ -194,23 +224,26 @@ def get_all_obras() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def create_obra(nome: str, endereco: str, cliente: str, orcamento: float) -> int:
+def create_obra(nome: str, endereco: str, cliente: str, orcamento: float,
+                data_inicio: str = "", data_prazo: str = "", responsavel: str = "") -> int:
     conn = get_connection()
     with conn:
         cur = conn.execute(
-            "INSERT INTO obras(nome,endereco,cliente,orcamento) VALUES(?,?,?,?)",
-            (nome, endereco, cliente, orcamento)
+            "INSERT INTO obras(nome,endereco,cliente,orcamento,data_inicio,data_prazo,responsavel) VALUES(?,?,?,?,?,?,?)",
+            (nome, endereco, cliente, orcamento, data_inicio or None, data_prazo or None, responsavel or None)
         )
     conn.close()
     return cur.lastrowid
 
 
-def update_obra(obra_id: int, nome: str, endereco: str, cliente: str, orcamento: float) -> None:
+def update_obra(obra_id: int, nome: str, endereco: str, cliente: str, orcamento: float,
+                data_inicio: str = "", data_prazo: str = "", responsavel: str = "") -> None:
     conn = get_connection()
     with conn:
         conn.execute(
-            "UPDATE obras SET nome=?,endereco=?,cliente=?,orcamento=? WHERE id=?",
-            (nome, endereco, cliente, orcamento, obra_id)
+            "UPDATE obras SET nome=?,endereco=?,cliente=?,orcamento=?,data_inicio=?,data_prazo=?,responsavel=? WHERE id=?",
+            (nome, endereco, cliente, orcamento,
+             data_inicio or None, data_prazo or None, responsavel or None, obra_id)
         )
     conn.close()
 
@@ -460,6 +493,7 @@ def approve_rdo(rdo_id: int, comment: str) -> None:
             WHERE id=?
         """, (comment, rdo_id))
     conn.close()
+    update_cronograma_from_rdo(rdo_id)
 
 
 def reject_rdo(rdo_id: int, comment: str) -> None:
@@ -512,3 +546,253 @@ def get_fotos(rdo_id: int) -> list[dict]:
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+# ── Cronograma ────────────────────────────────────────────────────────────────
+
+def get_cronograma(obra_id: int) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM cronograma WHERE obra_id=? ORDER BY ordem, id",
+        (obra_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_cronograma(obra_id: int, linhas: list[dict]) -> None:
+    """Replace all cronograma items for a project."""
+    conn = get_connection()
+    with conn:
+        conn.execute("DELETE FROM cronograma WHERE obra_id=?", (obra_id,))
+        for i, row in enumerate(linhas):
+            ativ = str(row.get("atividade","")).strip()
+            if not ativ:
+                continue
+            conn.execute(
+                """INSERT INTO cronograma(obra_id,atividade,data_inicio,data_fim,
+                   peso_percentual,percentual_executado,ordem)
+                   VALUES(?,?,?,?,?,?,?)""",
+                (obra_id, ativ,
+                 str(row.get("data_inicio","")) or "",
+                 str(row.get("data_fim","")) or "",
+                 float(row.get("peso_percentual",0) or 0),
+                 float(row.get("percentual_executado",0) or 0),
+                 i)
+            )
+    conn.close()
+
+
+def update_cronograma_item(item_id: int, percentual_executado: float) -> None:
+    conn = get_connection()
+    with conn:
+        conn.execute(
+            "UPDATE cronograma SET percentual_executado=? WHERE id=?",
+            (percentual_executado, item_id)
+        )
+    conn.close()
+
+
+def update_cronograma_from_rdo(rdo_id: int) -> None:
+    """
+    After approving an RDO, update cronograma percentual_executado
+    based on the atividades reported in that RDO.
+    Matches by LIKE on atividade name (case-insensitive).
+    """
+    conn = get_connection()
+    try:
+        rdo = conn.execute("SELECT obra_id FROM rdos WHERE id=?", (rdo_id,)).fetchone()
+        if not rdo:
+            return
+        obra_id = rdo["obra_id"]
+        atividades = conn.execute(
+            "SELECT descricao, percentual FROM rdo_atividades WHERE rdo_id=?",
+            (rdo_id,)
+        ).fetchall()
+        with conn:
+            for atv in atividades:
+                desc = atv["descricao"].strip()
+                pct = float(atv["percentual"] or 0)
+                # Find matching cronograma item(s)
+                matches = conn.execute(
+                    "SELECT id FROM cronograma WHERE obra_id=? AND LOWER(atividade) LIKE LOWER(?)",
+                    (obra_id, f"%{desc}%")
+                ).fetchall()
+                for m in matches:
+                    conn.execute(
+                        "UPDATE cronograma SET percentual_executado=? WHERE id=?",
+                        (pct, m["id"])
+                    )
+    finally:
+        conn.close()
+
+
+# ── Orçamento Analítico ───────────────────────────────────────────────────────
+
+def get_orcamento_itens(obra_id: int) -> list[dict]:
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM orcamento_itens WHERE obra_id=? ORDER BY id",
+        (obra_id,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def save_orcamento_itens(obra_id: int, itens: list[dict]) -> None:
+    """Replace all budget items for a project."""
+    conn = get_connection()
+    with conn:
+        conn.execute("DELETE FROM orcamento_itens WHERE obra_id=?", (obra_id,))
+        for row in itens:
+            item = str(row.get("item","")).strip()
+            if not item:
+                continue
+            conn.execute(
+                "INSERT INTO orcamento_itens(obra_id,item,descricao,valor) VALUES(?,?,?,?)",
+                (obra_id, item,
+                 str(row.get("descricao","")),
+                 float(row.get("valor",0) or 0))
+            )
+    conn.close()
+
+
+# ── KPIs do Dashboard ─────────────────────────────────────────────────────────
+
+def get_kpis_obra(obra_id: int) -> dict:
+    """
+    Returns all KPI data for a project dashboard.
+    All financial and schedule data comes exclusively from approved RDOs.
+    """
+    conn = get_connection()
+    try:
+        obra = conn.execute("SELECT * FROM obras WHERE id=?", (obra_id,)).fetchone()
+        if not obra:
+            return {}
+        obra = dict(obra)
+
+        # Cost KPIs from approved RDOs
+        cost_row = conn.execute("""
+            SELECT COALESCE(SUM(m.valor_total), 0) AS gasto_aprovado
+            FROM rdos r
+            JOIN rdo_materiais m ON m.rdo_id = r.id
+            WHERE r.obra_id=? AND r.status='aprovado'
+        """, (obra_id,)).fetchone()
+        gasto_aprovado = float(cost_row["gasto_aprovado"] or 0)
+        orcamento = float(obra.get("orcamento") or 0)
+        pct_custo = round(gasto_aprovado / orcamento * 100, 1) if orcamento > 0 else 0.0
+
+        # RDO counts
+        counts = conn.execute("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN status='aprovado'  THEN 1 ELSE 0 END) AS aprovados,
+                SUM(CASE WHEN status='pendente'  THEN 1 ELSE 0 END) AS pendentes,
+                SUM(CASE WHEN status='rejeitado' THEN 1 ELSE 0 END) AS rejeitados,
+                SUM(CASE WHEN status='rascunho'  THEN 1 ELSE 0 END) AS rascunhos
+            FROM rdos WHERE obra_id=?
+        """, (obra_id,)).fetchone()
+
+        # Working days = distinct dates from approved RDOs
+        dias_row = conn.execute("""
+            SELECT COUNT(DISTINCT data_relatorio) AS dias
+            FROM rdos WHERE obra_id=? AND status='aprovado'
+        """, (obra_id,)).fetchone()
+        dias_trabalhados = int(dias_row["dias"] or 0)
+
+        # Schedule KPIs from cronograma
+        crono_rows = conn.execute(
+            "SELECT peso_percentual, percentual_executado FROM cronograma WHERE obra_id=?",
+            (obra_id,)
+        ).fetchall()
+        total_peso = sum(float(r["peso_percentual"] or 0) for r in crono_rows)
+        if total_peso > 0:
+            exec_ponderado = sum(
+                float(r["percentual_executado"] or 0) * float(r["peso_percentual"] or 0)
+                for r in crono_rows
+            ) / total_peso
+        elif crono_rows:
+            exec_ponderado = sum(float(r["percentual_executado"] or 0) for r in crono_rows) / len(crono_rows)
+        else:
+            exec_ponderado = 0.0
+
+        # Calculate scheduled % based on current date
+        from datetime import date
+        hoje = date.today()
+        crono_full = conn.execute(
+            "SELECT data_inicio, data_fim, peso_percentual FROM cronograma WHERE obra_id=?",
+            (obra_id,)
+        ).fetchall()
+        if crono_full and total_peso > 0:
+            previsto_pond = 0.0
+            for r in crono_full:
+                try:
+                    di = date.fromisoformat(str(r["data_inicio"]))
+                    df = date.fromisoformat(str(r["data_fim"]))
+                    total_dias = (df - di).days
+                    if total_dias <= 0:
+                        pct_prev = 100.0 if hoje >= df else 0.0
+                    elif hoje < di:
+                        pct_prev = 0.0
+                    elif hoje >= df:
+                        pct_prev = 100.0
+                    else:
+                        pct_prev = (hoje - di).days / total_dias * 100
+                    previsto_pond += pct_prev * float(r["peso_percentual"] or 0)
+                except Exception:
+                    pass
+            cronograma_previsto = round(previsto_pond / total_peso, 1)
+        else:
+            cronograma_previsto = 0.0
+        cronograma_executado = round(exec_ponderado, 1)
+
+        # Last 5 occurrences from approved RDOs
+        ultimas_ocorrencias = conn.execute("""
+            SELECT o.tipo, o.descricao, o.acao_tomada, r.data_relatorio, r.numero_rdo
+            FROM rdo_ocorrencias o
+            JOIN rdos r ON r.id = o.rdo_id
+            WHERE r.obra_id=? AND r.status='aprovado'
+            ORDER BY r.data_relatorio DESC, o.id DESC
+            LIMIT 5
+        """, (obra_id,)).fetchall()
+
+        # Cost evolution: gasto por data (approved RDOs)
+        custo_por_data = conn.execute("""
+            SELECT r.data_relatorio, COALESCE(SUM(m.valor_total),0) AS custo_dia
+            FROM rdos r
+            LEFT JOIN rdo_materiais m ON m.rdo_id = r.id
+            WHERE r.obra_id=? AND r.status='aprovado'
+            GROUP BY r.data_relatorio
+            ORDER BY r.data_relatorio
+        """, (obra_id,)).fetchall()
+
+        # Team summary from approved RDOs (last approved RDO)
+        equipe_resumo = conn.execute("""
+            SELECT eq.funcao, SUM(eq.quantidade) AS total
+            FROM rdo_equipe eq
+            JOIN rdos r ON r.id = eq.rdo_id
+            WHERE r.obra_id=? AND r.status='aprovado'
+            GROUP BY eq.funcao
+            ORDER BY total DESC
+        """, (obra_id,)).fetchall()
+
+        return {
+            "obra": obra,
+            "orcamento": orcamento,
+            "gasto_aprovado": gasto_aprovado,
+            "saldo": orcamento - gasto_aprovado,
+            "pct_custo": pct_custo,
+            "cronograma_previsto": cronograma_previsto,
+            "cronograma_executado": cronograma_executado,
+            "rdos_total": int(counts["total"] or 0),
+            "rdos_aprovados": int(counts["aprovados"] or 0),
+            "rdos_pendentes": int(counts["pendentes"] or 0),
+            "rdos_rejeitados": int(counts["rejeitados"] or 0),
+            "rdos_rascunhos": int(counts["rascunhos"] or 0),
+            "dias_trabalhados": dias_trabalhados,
+            "ultimas_ocorrencias": [dict(r) for r in ultimas_ocorrencias],
+            "custo_por_data": [dict(r) for r in custo_por_data],
+            "equipe_resumo": [dict(r) for r in equipe_resumo],
+        }
+    finally:
+        conn.close()

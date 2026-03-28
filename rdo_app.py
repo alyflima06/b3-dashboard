@@ -80,6 +80,11 @@ with st.sidebar:
             nav_to("ver_rdos")
             st.rerun()
 
+        if st.button("📊 Dashboard", use_container_width=True,
+                     type="primary" if st.session_state["page"] == "dashboard" else "secondary"):
+            nav_to("dashboard")
+            st.rerun()
+
         st.divider()
         if st.button("🔒 Área do Coordenador", use_container_width=True):
             coord_login_dialog()
@@ -88,8 +93,9 @@ with st.sidebar:
         st.success("✅ Modo Coordenador")
 
         pages_coord = {
-            "aprovacoes": "✅ Aprovações",
-            "obras":      "🏗️ Obras",
+            "aprovacoes":  "✅ Aprovações",
+            "dashboard":   "📊 Dashboard KPIs",
+            "obras":       "🏗️ Obras",
             "engenheiros": "👷 Engenheiros",
         }
         for page_key, label in pages_coord.items():
@@ -115,12 +121,8 @@ if page in ("novo_rdo", "editar_rdo"):
     rdo_form.render()
 
 elif page == "ver_rdos":
-    if st.session_state.get("view_rdo_id"):
-        from rdo.pages import rdo_view
-        rdo_view.render()
-    else:
-        from rdo.pages import rdo_list
-        rdo_list.render()
+    from rdo.pages import rdo_list
+    rdo_list.render()
 
 elif page == "ver_rdo":
     from rdo.pages import rdo_view
@@ -132,6 +134,10 @@ elif page == "aprovacoes":
     else:
         from rdo.pages import approvals
         approvals.render()
+
+elif page == "dashboard":
+    from rdo.pages import project_dashboard
+    project_dashboard.render()
 
 elif page == "obras":
     if not st.session_state["coord_mode"]:
