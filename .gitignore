@@ -8,3 +8,7 @@ __pycache__/
 dist/
 build/
 .claude/settings.local.json
+
+# RDO app data
+rdo_data/*.db
+rdo_data/photos/
